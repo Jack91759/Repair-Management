@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtualenv
+venv/
+ENV/
+.env/
+.env
+
+# SQLite database
+repair_shop.db
+
+# VS Code
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db

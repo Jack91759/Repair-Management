@@ -338,20 +338,24 @@ def dashboard():
     active_listings = db.execute("SELECT COUNT(*) FROM listings WHERE status = 'Active'").fetchone()[0]
     active_appointments = db.execute("SELECT COUNT(*) FROM appointments WHERE status != 'Completed'").fetchone()[0]
     total_expenses = db.execute("SELECT IFNULL(SUM(amount),0) FROM expenses").fetchone()[0]
+    inventory_value = db.execute("SELECT IFNULL(SUM(quantity * price),0) FROM parts").fetchone()[0]
+    due_shipments = db.execute("SELECT COUNT(*) FROM shipments WHERE expected_date <= date('now') AND status NOT IN ('Delivered','Complete')").fetchone()[0]
     return render_template_string(page_body("""
     <h2>Dashboard</h2>
     <div class="card">
         <p><strong>Total revenue:</strong> ${{'%.2f'|format(total_revenue)}}</p>
         <p><strong>Open repairs:</strong> {{active_repairs}}</p>
         <p><strong>Low stock parts:</strong> {{low_stock}}</p>
+        <p><strong>Inventory value:</strong> ${{'%.2f'|format(inventory_value)}}</p>
         <p><strong>Pending shipments:</strong> {{pending_shipments}}</p>
+        <p><strong>Shipments due today or earlier:</strong> {{due_shipments}}</p>
         <p><strong>Active online listings:</strong> {{active_listings}}</p>
         <p><strong>Active appointments:</strong> {{active_appointments}}</p>
         <p><strong>Total expenses:</strong> ${{'%.2f'|format(total_expenses)}}</p>
     </div>
     """), total_revenue=total_revenue, active_repairs=active_repairs,
     low_stock=low_stock, pending_shipments=pending_shipments, active_listings=active_listings,
-    active_appointments=active_appointments, total_expenses=total_expenses)
+    active_appointments=active_appointments, total_expenses=total_expenses, inventory_value=inventory_value, due_shipments=due_shipments)
 
 @app.route("/reports")
 def reports():
@@ -401,6 +405,7 @@ def customers():
     return render_template_string(page_body("""
     <h2>Customers</h2>
     <div class="tools">
+        <a href="/export/customers">Export CSV</a>
         <form method="get" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
             <input name="q" placeholder="Search customers" value="{{query}}">
             <button type="submit">Search</button>
@@ -450,6 +455,7 @@ def devices():
     return render_template_string(page_body("""
     <h2>Devices</h2>
     <div class="tools">
+        <a href="/export/devices">Export CSV</a>
         <form method="get" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
             <select name="status">
                 <option value="">All statuses</option>
@@ -486,7 +492,7 @@ def devices():
         <button>Add</button>
     </form>
     <table>
-        <tr><th>Customer</th><th>Device</th><th>Specs</th><th>Status</th><th>Condition</th><th>Source</th></tr>
+        <tr><th>Customer</th><th>Device</th><th>Specs</th><th>Status</th><th>Condition</th><th>Source</th><th>Online</th></tr>
         {% for d in devices %}
         <tr>
             <td>{{d.customer or 'N/A'}}</td>
@@ -495,6 +501,7 @@ def devices():
             <td>{{d.status}}</td>
             <td>{{d.condition}}</td>
             <td>{{d.purchase_source}}</td>
+            <td>{{ 'Yes' if d.listed_online else 'No' }}</td>
         </tr>
         {% endfor %}
     </table>
@@ -735,12 +742,19 @@ def bulk_purchases():
 def listings():
     db = get_db()
     if request.method == "POST":
-        db.execute("INSERT INTO listings (device_id, platform, listing_price, listing_url, status, listed_at) VALUES (?,?,?,?,?,?)",
-                   (request.form.get("device_id"), request.form.get("platform"),
-                    request.form.get("listing_price"), request.form.get("listing_url"),
-                    request.form.get("status", "Active"), datetime.datetime.now().isoformat()))
-        if request.form.get("device_id"):
-            db.execute("UPDATE devices SET listed_online = 1 WHERE id = ?", (request.form.get("device_id"),))
+        if request.form.get("listing_id"):
+            status = request.form.get("status", "Active")
+            db.execute("UPDATE listings SET status = ? WHERE id = ?", (status, request.form["listing_id"]))
+            listing = db.execute("SELECT device_id FROM listings WHERE id = ?", (request.form["listing_id"],)).fetchone()
+            if status == "Sold" and listing and listing["device_id"]:
+                db.execute("UPDATE devices SET status = 'Sold' WHERE id = ?", (listing["device_id"],))
+        else:
+            db.execute("INSERT INTO listings (device_id, platform, listing_price, listing_url, status, listed_at) VALUES (?,?,?,?,?,?)",
+                       (request.form.get("device_id"), request.form.get("platform"),
+                        request.form.get("listing_price"), request.form.get("listing_url"),
+                        request.form.get("status", "Active"), datetime.datetime.now().isoformat()))
+            if request.form.get("device_id"):
+                db.execute("UPDATE devices SET listed_online = 1 WHERE id = ?", (request.form.get("device_id"),))
         db.commit()
         return redirect("/listings")
 
@@ -767,12 +781,23 @@ def listings():
         <button>Add</button>
     </form>
     <table>
-        <tr><th>Device</th><th>Platform</th><th>Price</th><th>Status</th><th>Listed</th><th>Link</th></tr>
+        <tr><th>Device</th><th>Platform</th><th>Price</th><th>Status</th><th>Listed</th><th>Link</th><th>Update</th></tr>
         {% for l in rows %}
         <tr>
             <td>{{l.brand or 'N/A'}} {{l.model or ''}}</td><td>{{l.platform}}</td><td>${{l.listing_price}}</td><td>{{l.status}}</td>
             <td>{{l.listed_at}}</td>
             <td>{% if l.listing_url %}<a href="{{l.listing_url}}" target="_blank">Link</a>{% else %}—{% endif %}</td>
+            <td>
+                <form method="post" style="display:inline-flex; gap:8px;">
+                    <input type="hidden" name="listing_id" value="{{l.id}}">
+                    <select name="status" style="min-width:120px;">
+                        <option{% if l.status == 'Active' %} selected{% endif %}>Active</option>
+                        <option{% if l.status == 'Sold' %} selected{% endif %}>Sold</option>
+                        <option{% if l.status == 'Paused' %} selected{% endif %}>Paused</option>
+                    </select>
+                    <button>Save</button>
+                </form>
+            </td>
         </tr>
         {% endfor %}
     </table>
@@ -856,9 +881,22 @@ def appointments():
 def quotes():
     db = get_db()
     if request.method == "POST":
-        db.execute("INSERT INTO quotes (customer_id, device_id, estimate, status, created_at, notes) VALUES (?,?,?,?,?,?)",
-                   (request.form.get("customer_id"), request.form.get("device_id"), request.form.get("estimate"),
-                    request.form.get("status", "Pending"), datetime.datetime.now().isoformat(), request.form.get("notes")))
+        if request.form.get("quote_action") == "convert_to_sale":
+            quote = db.execute("SELECT * FROM quotes WHERE id = ?", (request.form.get("quote_id"),)).fetchone()
+            if quote:
+                db.execute("INSERT INTO sales (customer_id, device_id, quantity, unit_price, total, channel, listing_url, bulk_order, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                           (quote["customer_id"], quote["device_id"], 1, quote["estimate"], quote["estimate"], "Store", None, 0, datetime.datetime.now().isoformat()))
+                db.execute("UPDATE quotes SET status = 'Accepted' WHERE id = ?", (quote["id"],))
+        elif request.form.get("quote_action") == "convert_to_repair":
+            quote = db.execute("SELECT * FROM quotes WHERE id = ?", (request.form.get("quote_id"),)).fetchone()
+            if quote:
+                db.execute("INSERT INTO repairs (device_id, issue, status, created_at) VALUES (?,?,?,?)",
+                           (quote["device_id"], "Quote accepted", "Open", datetime.datetime.now().isoformat()))
+                db.execute("UPDATE quotes SET status = 'Accepted' WHERE id = ?", (quote["id"],))
+        else:
+            db.execute("INSERT INTO quotes (customer_id, device_id, estimate, status, created_at, notes) VALUES (?,?,?,?,?,?)",
+                       (request.form.get("customer_id"), request.form.get("device_id"), request.form.get("estimate"),
+                        request.form.get("status", "Pending"), datetime.datetime.now().isoformat(), request.form.get("notes")))
         db.commit()
         return redirect("/quotes")
 
@@ -891,9 +929,23 @@ def quotes():
         <button>Add</button>
     </form>
     <table>
-        <tr><th>Created</th><th>Customer</th><th>Device</th><th>Estimate</th><th>Status</th><th>Notes</th></tr>
+        <tr><th>Created</th><th>Customer</th><th>Device</th><th>Estimate</th><th>Status</th><th>Notes</th><th>Actions</th></tr>
         {% for q in rows %}
-        <tr><td>{{q.created_at}}</td><td>{{q.customer or 'N/A'}}</td><td>{{q.brand or 'N/A'}} {{q.model or ''}}</td><td>${{q.estimate}}</td><td>{{q.status}}</td><td>{{q.notes}}</td></tr>
+        <tr>
+            <td>{{q.created_at}}</td><td>{{q.customer or 'N/A'}}</td><td>{{q.brand or 'N/A'}} {{q.model or ''}}</td><td>${{q.estimate}}</td><td>{{q.status}}</td><td>{{q.notes}}</td>
+            <td>
+                <form method="post" style="display:inline-flex; gap:8px;">
+                    <input type="hidden" name="quote_id" value="{{q.id}}">
+                    <input type="hidden" name="quote_action" value="convert_to_sale">
+                    <button>Convert to Sale</button>
+                </form>
+                <form method="post" style="display:inline-flex; gap:8px;">
+                    <input type="hidden" name="quote_id" value="{{q.id}}">
+                    <input type="hidden" name="quote_action" value="convert_to_repair">
+                    <button>Convert to Repair</button>
+                </form>
+            </td>
+        </tr>
         {% endfor %}
     </table>
     """), rows=rows, customers=customers, devices=devices)
@@ -931,22 +983,37 @@ def expenses():
 @app.route("/shipments", methods=["GET", "POST"])
 def shipments():
     db = get_db()
+    query = request.args.get("q", "").strip()
     if request.method == "POST":
-        carrier = request.form.get("carrier")
-        expected_date = request.form.get("expected_date")
-        status = request.form.get("status")
-        if not expected_date or not status:
-            suggested_date, suggested_status = get_carrier_eta(carrier)
-            expected_date = expected_date or suggested_date
-            status = status or suggested_status
-        db.execute("INSERT INTO shipments (carrier, tracking, status, expected_date) VALUES (?,?,?,?)",
-                   (carrier, request.form.get("tracking"), status, expected_date))
+        if request.form.get("shipment_id"):
+            db.execute("UPDATE shipments SET status = ?, expected_date = ?, tracking = ? WHERE id = ?",
+                       (request.form.get("status"), request.form.get("expected_date"), request.form.get("tracking"), request.form["shipment_id"]))
+        else:
+            carrier = request.form.get("carrier")
+            expected_date = request.form.get("expected_date")
+            status = request.form.get("status")
+            if not expected_date or not status:
+                suggested_date, suggested_status = get_carrier_eta(carrier)
+                expected_date = expected_date or suggested_date
+                status = status or suggested_status
+            db.execute("INSERT INTO shipments (carrier, tracking, status, expected_date) VALUES (?,?,?,?)",
+                       (carrier, request.form.get("tracking"), status, expected_date))
         db.commit()
         return redirect("/shipments")
 
-    rows = db.execute("SELECT * FROM shipments").fetchall()
+    if query:
+        rows = db.execute("SELECT * FROM shipments WHERE carrier LIKE ? OR tracking LIKE ?", (f"%{query}%", f"%{query}%")).fetchall()
+    else:
+        rows = db.execute("SELECT * FROM shipments").fetchall()
     return render_template_string(page_body("""
     <h2>Shipments</h2>
+    <div class="tools">
+        <a href="/export/shipments">Export CSV</a>
+        <form method="get" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <input name="q" placeholder="Search carrier or tracking" value="{{query}}">
+            <button type="submit">Filter</button>
+        </form>
+    </div>
     <form method="post">
         <input name="carrier" placeholder="Carrier">
         <input name="tracking" placeholder="Tracking #">
@@ -955,23 +1022,39 @@ def shipments():
         <button>Add</button>
     </form>
     <table>
-        <tr><th>Carrier</th><th>Tracking</th><th>Status</th><th>ETA</th></tr>
+        <tr><th>Carrier</th><th>Tracking</th><th>Status</th><th>ETA</th><th>Update</th></tr>
         {% for s in rows %}
-        <tr><td>{{s.carrier}}</td><td>{{s.tracking}}</td><td>{{s.status}}</td><td>{{s.expected_date}}</td></tr>
+        <tr>
+            <td>{{s.carrier}}</td><td>{{s.tracking}}</td><td>{{s.status}}</td><td>{{s.expected_date}}</td>
+            <td>
+                <form method="post" style="display:inline-flex; gap:8px;">
+                    <input type="hidden" name="shipment_id" value="{{s.id}}">
+                    <input name="tracking" placeholder="Tracking" value="{{s.tracking}}">
+                    <input name="status" placeholder="Status" value="{{s.status}}">
+                    <input name="expected_date" placeholder="ETA" value="{{s.expected_date}}">
+                    <button>Save</button>
+                </form>
+            </td>
+        </tr>
         {% endfor %}
     </table>
-    """), rows=rows)
+    """), rows=rows, query=query)
 
 @app.route("/export/<table_name>")
 def export_table(table_name):
     db = get_db()
     allowed = {
+        "customers": "SELECT * FROM customers",
+        "devices": "SELECT * FROM devices",
+        "parts": "SELECT * FROM parts",
         "sales": "SELECT * FROM sales",
         "appointments": "SELECT * FROM appointments",
         "quotes": "SELECT * FROM quotes",
         "expenses": "SELECT * FROM expenses",
         "bulk_purchases": "SELECT * FROM bulk_purchases",
-        "listings": "SELECT * FROM listings"
+        "listings": "SELECT * FROM listings",
+        "shipments": "SELECT * FROM shipments",
+        "technicians": "SELECT * FROM technicians"
     }
     if table_name not in allowed:
         return redirect("/")
